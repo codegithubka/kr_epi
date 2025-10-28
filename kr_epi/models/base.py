@@ -8,7 +8,7 @@ class ODEBase:
     def state_labels(self) -> Sequence[str]:
         raise NotImplementedError
 
-    def rhs(self, t: float, y: Array, beta_fn: Optional[Callable[[float], float]] = None) -> Array:
+    def rhs(self, t: float, y: Array, beta_fn: Optional[Callable[[float], float]] = None) -> Array: # type: ignore
         raise NotImplementedError
 
     def integrate(

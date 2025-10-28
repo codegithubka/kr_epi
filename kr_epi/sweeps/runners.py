@@ -8,7 +8,7 @@ Array = np.ndarray
 
 @dataclass
 class EnsembleResult:
-    times: Array                 # common grid
+    times: Array                 # type: ignore # common grid
     series: Array                # shape (n_runs, n_states, n_times)
     labels: Tuple[str, ...]
     seeds: List[int]

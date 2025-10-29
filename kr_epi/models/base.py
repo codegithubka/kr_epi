@@ -1,14 +1,15 @@
 #/!/usr/bin/env python3
 
 
-from typing import Callable, Dict, Optional, Sequence, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple, List
 import numpy as np
 from scipy.integrate import solve_ivp
 
 Array = np.ndarray
 
 class ODEBase:
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> Sequence[str]:
         raise NotImplementedError
 
     def rhs(self, t: float, y: Array, beta_fn: Optional[Callable[[float], float]] = None) -> Array: # type: ignore
@@ -16,21 +17,48 @@ class ODEBase:
 
     def integrate(
         self,
-        y0: Dict[str, float],
-        t_span: Tuple[float, float],
-        t_eval: Optional[Array] = None, # type: ignore
+        y0: Dict[str, float] | np.ndarray | List[float], # <-- Updated type hint
+        t_span,
+        t_eval=None,
         beta_fn: Optional[Callable[[float], float]] = None,
         stiff_fallback: bool = True,
         guard_negatives: bool = True,
         **solve_kw
     ):
-        labels = list(self.state_labels())
-        y0v = np.array([y0.get(k, 0.0) for k in labels], dtype=float)
+        """
+        Integrate the ODE system.
+
+        Args:
+            y0 (Dict[str, float] | np.ndarray | List[float]):
+                Initial conditions. Can be a dictionary mapping state labels
+                to values (e.g., {'S': 0.99, 'I': 0.01}) or a
+                numpy array/list with values in the correct order
+                as defined by model.labels.
+        ... (rest of docstring) ...
+        """
+        labels = list(self.labels)
+        
+        # --- NEW LOGIC TO HANDLE y0 ---
+        if isinstance(y0, dict):
+            # Convert from dict to array based on labels
+            y0v = np.array([y0.get(k, 0.0) for k in labels], dtype=float)
+        elif isinstance(y0, (np.ndarray, list, tuple)):
+            # Assume it's already a correctly ordered array/list
+            y0v = np.asarray(y0, dtype=float)
+            if len(y0v) != len(labels):
+                raise ValueError(
+                    f"y0 array has length {len(y0v)}, but model has "
+                    f"{len(labels)} states: {labels}"
+                )
+        else:
+            raise TypeError(
+                f"y0 must be a dict, numpy.ndarray, list, or tuple, "
+                f"got {type(y0)}"
+            )
+        # --- END NEW LOGIC ---
 
         def f(t, y):
             dy = self.rhs(t, y, beta_fn)
-            if guard_negatives:
-                y[:] = np.maximum(y, -1e-12)
             return dy
 
         method = solve_kw.pop("method", "RK45")

@@ -147,15 +147,132 @@ class TauLeap:
         return t_arr, X_arr
 
     def _suggest_tau(self, x: np.ndarray, a: np.ndarray, S: np.ndarray) -> float:
-        """Suggests tau based on Gillespie's 2001 condition."""
-        small = 1e-12 # Prevent division by zero
+        """
+        Suggest tau step size using adaptive method.
+        
+        From Cao, Gillespie & Petzold (2006), "Efficient step size selection
+        for the tau-leaping simulation method."
+        
+        The tau-selection condition ensures:
+        1. Mean change < eps * current value
+        2. Std dev of change < eps * current value
+        
+        Parameters
+        ----------
+        x : ndarray
+            Current state vector
+        a : ndarray
+            Current hazards (propensities)
+        S : ndarray
+            Stoichiometry matrix
+            
+        Returns
+        -------
+        float
+            Suggested time step tau
+        """
+        small = 1e-12
+        
+        # Calculate expected change and variance for each species
+        # mu_i = sum_j S_ij * a_j (mean change per unit time)
+        # sigma2_i = sum_j S_ij^2 * a_j (variance per unit time)
+        mu = S @ a
+        sigma2 = (S**2) @ a
+        
+        # Tau-selection conditions from Cao et al. (2006):
+        # For each species i:
+        #   |mu_i * tau| <= eps * x_i
+        #   sqrt(sigma2_i * tau) <= eps * x_i
+        #
+        # Solving for tau:
+        #   tau <= eps * x_i / |mu_i|
+        #   tau <= eps^2 * x_i^2 / sigma2_i
+        
+        tau_candidates = []
+        
+        for i in range(len(x)):
+            if x[i] > self.critical_threshold:  # Only for abundant species
+                # Condition 1: mean change
+                if abs(mu[i]) > small:
+                    tau1 = self.eps * x[i] / abs(mu[i])
+                    tau_candidates.append(tau1)
+                
+                # Condition 2: variance
+                if sigma2[i] > small:
+                    tau2 = (self.eps * x[i])**2 / sigma2[i]
+                    tau_candidates.append(tau2)
+        
+        if not tau_candidates:
+            # If no constraints, use maximum tau
+            return self.max_dt
+        
+        # Take minimum of all candidates and apply safety factor
+        tau = min(tau_candidates) * self.safety
+        
+        # Clamp to [min_dt, max_dt]
+        tau = max(self.min_dt, min(tau, self.max_dt))
+        
+        return tau
 
-        # Estimate mean and variance of change for each species i
-        mu = S @ a      # E[dX_i/dt]
-        sigma_sq = S**2 @ a # Approx Var[dX_i/dt] (only works if reactions are independent, approximation)
 
-        # Condition: |mu_i * tau| << x_i  AND  sigma_sq_i * tau^2 << x_i
-        # Simplified using epsilon:
-        # tau <= eps * x_i / |mu_i|
-        # tau <= eps^2 * x_i / sigma_sq_i
-        # We need tau >
+    def _get_critical_reactions(
+        self, 
+        x: np.ndarray, 
+        a: np.ndarray, 
+        S: np.ndarray, 
+        tau: float
+    ) -> np.ndarray:
+        """
+        Identify reactions that could cause negative populations.
+        
+        A reaction is critical if firing it would make any reactant negative,
+        or if the expected number of firings times the stoichiometry change
+        is comparable to the current population.
+        
+        Parameters
+        ----------
+        x : ndarray
+            Current state
+        a : ndarray
+            Reaction hazards
+        S : ndarray
+            Stoichiometry matrix
+        tau : float
+            Proposed time step
+            
+        Returns
+        -------
+        ndarray
+            Boolean array indicating which reactions are critical
+        """
+        n_reactions = len(a)
+        is_critical = np.zeros(n_reactions, dtype=bool)
+        
+        for j in range(n_reactions):
+            # Expected number of times reaction j fires
+            expected_fires = a[j] * tau
+            
+            # Check if any species would go negative
+            state_change = S[:, j] * expected_fires
+            
+            # A reaction is critical if:
+            # 1. It depletes a low-abundance species, OR
+            # 2. Expected change is large compared to population
+            for i in range(len(x)):
+                if S[i, j] < 0:  # This reaction consumes species i
+                    # Would make negative?
+                    if x[i] + state_change[i] < 0:
+                        is_critical[j] = True
+                        break
+                    
+                    # Is species near critical threshold?
+                    if x[i] < self.critical_threshold:
+                        is_critical[j] = True
+                        break
+                    
+                    # Is change too large?
+                    if abs(state_change[i]) > self.eps * x[i]:
+                        is_critical[j] = True
+                        break
+        
+        return is_critical

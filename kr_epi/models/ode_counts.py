@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Callable, Tuple, Dict, Sequence
 import numpy as np
 from kr_epi.models.base import ODEBase
+import warnings
 
 
 Mixing = Literal["frequency", "density"]
@@ -54,8 +55,9 @@ class SIRDemographyCounts(ODEBase):
             
         self.params = SIRDemographyCountsParams(beta, gamma, v, mu, mixing, vacc_p)
 
-    def state_labels(self) -> Sequence[str]:
-        return ("X", "Y", "Z")
+    @property
+    def labels(self) -> list[str]:
+        return ["X", "Y", "Z"] # (or S, E, I, R)
     
     def rhs(self, t: float, y: np.ndarray, beta_fn: Optional[Callable[[float], float]] = None) -> np.ndarray:
         X, Y, Z = y
@@ -76,78 +78,140 @@ class SIRDemographyCounts(ODEBase):
         """
         Calculate basic reproduction number.
         
-        For frequency-dependent: R0 = beta / (gamma + mu)
-        For density-dependent: R0 = beta * N0 / (gamma + mu)
+        From Keeling & Rohani (2008), Equation 2.19:
+        - Frequency-dependent: R₀ = β/(γ+μ)
+        - Density-dependent: R₀ = βN*/(γ+μ) where N* = ν/μ
         
         Parameters
         ----------
         N0 : float, optional
-            Initial population size (required for density-dependent mixing)
+            Override for equilibrium population size. If not provided,
+            uses N* = v/mu from demographic equilibrium.
             
         Returns
         -------
         float
             Basic reproduction number
+            
+        References
+        ----------
+        Keeling & Rohani (2008), Section 2.1.2, Equation 2.19
         """
         p = self.params
+        
         if p.mixing == "frequency":
             return p.beta / (p.gamma + p.mu)
-        else:  # density: note the dependence on N
-            if N0 is None:
-                raise ValueError("N0 required for density-dependent R0 calculation")
-            return p.beta * N0 / (p.gamma + p.mu)
+        else:  # density-dependent
+            # Use demographic equilibrium N* = v/mu
+            if p.v > 0 and p.mu > 0:
+                N_star = p.v / p.mu
+            elif N0 is not None:
+                # Allow override but warn
+                N_star = N0
+                import warnings
+                warnings.warn(
+                    f"Using N0={N0} for R0 calculation. "
+                    f"Demographic equilibrium would give N*={p.v/p.mu if p.v>0 and p.mu>0 else 'undefined'}"
+                )
+            else:
+                raise ValueError(
+                    "Cannot calculate R0 for density-dependent mixing: "
+                    "need v>0 and mu>0, or provide N0 explicitly"
+                )
+            
+            return p.beta * N_star / (p.gamma + p.mu)
     
     def endemic_equilibrium(self, N0: float = None) -> Dict[str, float]:
         """
-        Calculate endemic equilibrium (K&R Section 2.1.2.1, eq 2.19).
+        Calculate endemic equilibrium for SIR model with demography.
         
-        For frequency-dependent transmission:
-            X* = (gamma + mu) / beta = N* / R0
-            Y* = (mu / beta) * (R0 - 1)
-            Z* = N* - X* - Y*
-            N* = v / mu (carrying capacity)
-            
+        From Keeling & Rohani (2008), Section 2.1.2, Equations 2.19-2.20:
+        
+        At endemic equilibrium (frequency-dependent):
+            S*/N* = 1/R₀
+            I*/N* = (μ/(γ+μ)) × (1 - 1/R₀)
+            R*/N* = (γ/(γ+μ)) × (1 - 1/R₀)
+            N* = ν/μ (demographic equilibrium)
+        
         Parameters
         ----------
         N0 : float, optional
-            Population size for density-dependent (defaults to v/mu)
+            Override equilibrium population size
             
         Returns
         -------
         dict
-            Equilibrium values {'X': X*, 'Y': Y*, 'Z': Z*, 'N': N*}
-            Returns None values if R0 <= 1 (no endemic equilibrium)
+            Dictionary with keys 'X', 'Y', 'Z', 'N', 'R0'
+            Values are None if R₀ ≤ 1 (no endemic equilibrium)
+            
+        References
+        ----------
+        Keeling & Rohani (2008), Section 2.1.2, Box 2.1
         """
         p = self.params
         
-        # Calculate carrying capacity
+        # Calculate carrying capacity N* = v/mu
         if p.v > 0 and p.mu > 0:
             N_star = p.v / p.mu
         elif N0 is not None:
             N_star = N0
         else:
-            N_star = 1.0
+            N_star = 1.0  # Default for closed population approximation
         
         # Calculate R0
-        R0_val = self.R0(N_star) if p.mixing == "density" else self.R0()
+        if p.mixing == "density":
+            R0_val = self.R0(N_star)
+        else:
+            R0_val = self.R0()
         
         # No endemic equilibrium if R0 <= 1
         if R0_val <= 1:
-            return {'X': None, 'Y': None, 'Z': None, 'N': None, 'R0': R0_val}
+            return {
+                'X': None, 
+                'Y': None, 
+                'Z': None, 
+                'N': None, 
+                'R0': R0_val
+            }
         
-        # Endemic equilibrium (K&R eq 2.19)
+        # Endemic equilibrium (K&R Eq 2.19-2.20)
         if p.mixing == "frequency":
-            X_star = N_star / R0_val  # X* / N* = 1/R0
-            Y_star = (p.mu / p.beta) * (R0_val - 1)
-        else:
+            # As fractions of N*
+            s_frac = 1.0 / R0_val
+            i_frac = (p.mu / (p.gamma + p.mu)) * (1.0 - 1.0/R0_val)
+            r_frac = (p.gamma / (p.gamma + p.mu)) * (1.0 - 1.0/R0_val)
+            
+            # Convert to counts
+            X_star = s_frac * N_star
+            Y_star = i_frac * N_star  # FIX: Multiply by N_star!
+            Z_star = r_frac * N_star
+            
+        else:  # density-dependent
+            # From setting dS/dt = dI/dt = 0
+            # S* = (γ+μ)/β
             X_star = (p.gamma + p.mu) / p.beta
-            Y_star = (p.v - p.mu * X_star) / (p.gamma + p.mu)
+            
+            # I* from birth-death balance: v*N* = (γ+μ)*I* + μ*(S*+R*)
+            # After algebra: I* = (v*N* - μ*S*) / (γ+μ)
+            Y_star = (p.v * N_star - p.mu * X_star) / (p.gamma + p.mu)
+            
+            # R* from total: N* = S* + I* + R*  
+            Z_star = N_star - X_star - Y_star
         
-        Z_star = N_star - X_star - Y_star
+        # Validate equilibrium
+        if Y_star < 0 or Z_star < 0:
+            return {
+                'X': None,
+                'Y': None, 
+                'Z': None,
+                'N': None,
+                'R0': R0_val,
+                'error': 'Negative compartment at equilibrium'
+            }
         
         return {
             'X': X_star,
-            'Y': Y_star, 
+            'Y': Y_star,
             'Z': Z_star,
             'N': N_star,
             'R0': R0_val
@@ -202,8 +266,9 @@ class SISDemographyCounts(ODEBase):
             
         self.params = SISDemographyCountsParams(beta, gamma, v, mu, mixing)
 
-    def state_labels(self) -> Sequence[str]:
-        return ("X", "Y")
+    @property
+    def labels(self) -> list[str]:
+        return ["X", "Y"] # (or S, E, I, R)
 
     def rhs(self, t: float, y: np.ndarray, beta_fn: Optional[Callable[[float], float]] = None) -> np.ndarray:
         X, Y = y
@@ -324,8 +389,9 @@ class SEIRDemographyCounts(ODEBase):
             
         self.params = SEIRDemographyCountsParams(beta, sigma, gamma, v, mu, mixing, vacc_p)
 
-    def state_labels(self) -> Sequence[str]:
-        return ("X", "E", "Y", "Z")
+    @property
+    def labels(self) -> list[str]:
+        return ["X", "E", "Y", "Z"] # (or S, E, I, R)
 
     def rhs(self, t: float, y: np.ndarray, beta_fn: Optional[Callable[[float], float]] = None) -> np.ndarray:
         X, E, Y, Z = y
@@ -345,20 +411,50 @@ class SEIRDemographyCounts(ODEBase):
 
     def R0(self, N0: float = None) -> float:
         """
-        Calculate basic reproduction number.
+        Calculate basic reproduction number for SEIR with demography.
         
-        R0 = (beta) * (sigma/(mu+sigma)) * (1/(mu+gamma)) for frequency
-        R0 = (beta * N0) * (sigma/(mu+sigma)) * (1/(mu+gamma)) for density
+        From Keeling & Rohani (2008), Box 2.5:
+        
+            R₀ = β/(γ+μ) × σ/(σ+μ)
+        
+        The factor σ/(σ+μ) represents the probability that an individual
+        in the exposed class survives to become infectious.
+        
+        Parameters
+        ----------
+        N0 : float, optional
+            Population size for density-dependent transmission
+            
+        Returns
+        -------
+        float
+            Basic reproduction number
+            
+        References
+        ----------
+        Keeling & Rohani (2008), Section 2.6, Box 2.5, Equation 2.53
         """
         p = self.params
-        # R0 = (beta * X*/N*) * (1/(mu+sigma)) * (sigma/(mu+gamma)) for frequency;
-        # for density, replace beta*X*/N* with beta*X* = beta*N0
+        
+        # Probability of surviving E compartment
+        prob_survive_E = p.sigma / (p.sigma + p.mu)
+        
+        # Average time infectious (accounting for death)
+        avg_infectious_time = 1.0 / (p.gamma + p.mu)
+        
         if p.mixing == "frequency":
-            return (p.beta) * (p.sigma / (p.mu + p.sigma)) * (1.0 / (p.mu + p.gamma))
-        else:
-            if N0 is None:
-                raise ValueError("N0 required for density-dependent R0 calculation")
-            return (p.beta * N0) * (p.sigma / (p.mu + p.sigma)) * (1.0 / (p.mu + p.gamma))
+            # R0 = (contacts per time) × (prob survive E) × (time infectious)
+            return p.beta * prob_survive_E * avg_infectious_time
+        else:  # density
+            # Use N* = v/mu
+            if p.v > 0 and p.mu > 0:
+                N_star = p.v / p.mu
+            elif N0 is not None:
+                N_star = N0
+            else:
+                raise ValueError("Need v>0, mu>0 or provide N0 for density-dependent R0")
+            
+            return p.beta * N_star * prob_survive_E * avg_infectious_time
     
     def check_conservation(self, y: np.ndarray) -> float:
         """Check conservation: dN/dt should equal (v - mu)*N."""
@@ -378,7 +474,6 @@ class MSIRDemographyCountsParams(SIRDemographyCountsParams):
     alpha: float = 1.0 / 180.0  # Rate of loss of maternal immunity (e.g., 1/180 days)
 
     def __post_init__(self):
-        super().__post_init__()
         if self.alpha <= 0:
             raise ValueError(f"alpha (loss of immunity rate) must be positive, got {self.alpha}")
 
@@ -454,29 +549,6 @@ class MSIRDemographyCounts(ODEBase):
         if R0 <= 1.0 or p.v == 0.0 or p.mu == 0.0:
             return None # Endemic state not feasible
 
-        # Assume N* = v / mu (if v=mu) or solve for N, but here we
-        # solve for fractions and scale by N* if needed.
-        # Let's assume v=mu for stable N=N* (though the model supports v!=mu)
-        # For simplicity, let's solve assuming N=1 (fractions) if mixing='frequency'
-        # N* = N* (cancels)
-        # S* = (gamma + mu) / beta   (since S*/N* = 1/R0 for freq mixing)
-        # I* = (mu / beta) * (R0 - 1) * (alpha + mu) / alpha  <-- This isn't quite right
-        
-        # Let's re-derive from steady state equations (setting d/dt=0, N=1, v=mu)
-        # 0 = mu * (1 - vacc_p) - (alpha + mu) * M  => M* = mu * (1 - vacc_p) / (alpha + mu)
-        # 0 = lam*S* = (gamma + mu) * I* => lam* = (gamma + mu) * I* / S*
-        # 0 = alpha*M* - lam*S* - mu*S* => alpha*M* = (lam + mu) * S*
-        # S* = alpha*M* / (lam + mu)
-        
-        # If freq mixing (lam = beta * I* / N* = beta * I*):
-        # S* = (gamma + mu) / beta  (S*/N* = 1/R0)
-        # S_star = (p.gamma + p.mu) / p.beta
-        
-        # from dI/dt=0: I* = (lam*S*) / (gamma + mu)
-        # from dS/dt=0: lam*S* = alpha*M* - mu*S*
-        # I* = (alpha*M* - mu*S*) / (gamma + mu)
-        
-        # from dM/dt=0: M* = p.v * (1 - p.vacc_p) / (p.alpha + p.mu) (assuming N=1, v=mu)
         M_star = p.mu * (1.0 - p.vacc_p) / (p.alpha + p.mu)
         
         # We need N=1, v=mu for this simple solution
@@ -506,16 +578,52 @@ class MSIRDemographyCounts(ODEBase):
         y_eq = np.array([M_star, S_star, I_star, R_star]) * N_star
         return y_eq
 
-    def check_conservation(self, y: np.ndarray) -> tuple[bool, str]:
+
+    
+    def check_conservation(self, y: np.ndarray) -> float:
+        """
+        Check population conservation law: dN/dt should equal (v - mu)*N.
+        
+        Parameters
+        ----------
+        y : np.ndarray
+            State vector [M, S, I, R]
+            
+        Returns
+        -------
+        float
+            Absolute conservation error (should be near zero)
+            
+        Warnings
+        --------
+        If v != mu, warns that endemic equilibrium calculation assumes v=mu.
+        """
         p = self.params
-        if np.isclose(p.v, p.mu):
-            N = y.sum()
-            N_expected = p.v / p.mu
-            is_conserved = np.allclose(N, N_expected, rtol=1e-3)
-            msg = f"N = {N:.2f}, Expected N = {N_expected:.2f}"
-            return is_conserved, msg
-        else:
-            return True, "N/A (v != mu)"
+        M, S, I, R = y
+        N = M + S + I + R
+        
+        # Calculate actual dN/dt
+        dy = self.rhs(0, y)
+        dN_actual = dy.sum()
+        
+        # Expected dN/dt = (v - mu) * N
+        dN_expected = (p.v - p.mu) * N
+        
+        # Calculate error
+        error = abs(dN_actual - dN_expected)
+        
+        # Warn if v != mu (since endemic equilibrium assumes balanced demography)
+        if not np.isclose(p.v, p.mu, rtol=1e-6):
+            warnings.warn(
+                f"MSIR model has v={p.v:.4f} != mu={p.mu:.4f}. "
+                "Note: endemic_equilibrium() method assumes v=mu for analytical solution.",
+                UserWarning
+            )
+        
+        return error
+        
+            
+        
    
    
 @dataclass(frozen=True)
@@ -524,10 +632,11 @@ class SEIRSDemographyCountsParams(SEIRDemographyCountsParams):
     omega: float = 0.0  # Rate of waning immunity (R -> S)
 
     def __post_init__(self):
-        super().__post_init__()
+        # Parent validation happens in SEIRDemographyCounts.__init__()
+        # Don't call super() - parent doesn't have __post_init__
         if self.omega < 0:
             raise ValueError(f"omega (waning rate) must be non-negative, got {self.omega}")
-
+        
 class SEIRSDemographyCounts(SEIRDemographyCounts):
     """
     SEIRS model with births, deaths, and counts (S-E-I-R-S).
@@ -594,52 +703,9 @@ class SEIRSDemographyCounts(SEIRDemographyCounts):
              print("Warning: Endemic equilibrium calculation for SEIRS only implemented for R0>1, frequency mixing, and v=mu.")
              return None
 
-        # Solve steady-state equations (N=1, v=mu)
-        # S* / N* = 1 / R0
-        # S_star = 1.0 / R0 # This is only true if omega=0 !
-        
-        # Let's solve from scratch (N=1, v=mu)
-        # dE/dt=0 => lam*S = (sigma+mu)E => E* = lam*S / (sigma+mu)
-        # dI/dt=0 => sigma*E = (gamma+mu)I => I* = sigma*E / (gamma+mu)
-        # Substitute E* into I*:
-        # I* = sigma * (lam*S / (sigma+mu)) / (gamma+mu)
-        # If lam = beta*I:
-        # I* = sigma * (beta*I*S / (sigma+mu)) / (gamma+mu)
-        # 1 = (sigma*beta*S) / ((sigma+mu)(gamma+mu))
-        # S* = ((sigma+mu)(gamma+mu)) / (sigma*beta)
-        # S* = 1 / R0_eff  (where R0_eff = (beta/(gamma+mu))*(sigma/(sigma+mu)))
-        # This holds: S_star = 1.0 / R0 (as a fraction)
-        
+
         S_star = 1.0 / R0
 
-        # dR/dt=0 => mu*vacc_p + gamma*I = (mu+omega)*R
-        # R* = (mu*vacc_p + gamma*I) / (mu+omega)
-        
-        # dI/dt=0 => I* = sigma*E / (gamma+mu)
-        # dE/dt=0 => E* = (beta*I*S) / (sigma+mu)  (using lam=beta*I, N=1)
-        # Substitute S_star:
-        # E* = (beta*I*S_star) / (sigma+mu)
-        
-        # dS/dt=0 => mu*(1-vacc_p) - beta*I*S - mu*S + omega*R = 0
-        # Substitute S*, E*, R*:
-        # mu(1-vacc_p) - beta*I*(1/R0) - mu*(1/R0) + omega*((mu*vacc_p + gamma*I) / (mu+omega)) = 0
-        
-        # Group terms with I*:
-        # I * [ -beta/R0 + omega*gamma/(mu+omega) ] = -mu(1-vacc_p) + mu/R0 - omega*mu*vacc_p/(mu+omega)
-        # I * [ (omega*gamma - beta*(mu+omega)/R0) / (mu+omega) ] = mu * [ -1+vacc_p + 1/R0 - omega*vacc_p/(mu+omega) ]
-        
-        # This is getting complex. Let's use the simpler relations:
-        # E* = (gamma+mu)/sigma * I*
-        # R* = (mu*p.vacc_p + p.gamma*I*) / (p.mu + p.omega)
-        # S* = 1 - E* - I* - R* (since N=1)
-        
-        # And S* must also equal 1/R0.
-        # 1/R0 = 1 - E* - I* - R*
-        # 1/R0 = 1 - ((gamma+mu)/sigma)*I - I - (mu*vacc_p + gamma*I) / (mu+omega)
-        
-        # Solve for I*:
-        # I * [ (gamma+mu)/sigma + 1 + gamma/(mu+omega) ] = 1 - 1/R0 - (mu*vacc_p)/(mu+omega)
-        
         term_E = (p.gamma + p.mu) / p.sigma
         term_I = 1.0
         term_R = p.gamma / (p.mu + p.omega)

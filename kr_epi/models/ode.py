@@ -63,7 +63,8 @@ class SI(ODEBase):
         self.params = SIParams(beta=beta, mixing=mixing)
         
         
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("S", "I")
     
     def rhs(self, t: float, y: np.ndarray, 
@@ -128,7 +129,8 @@ class SIS(ODEBase):
     def __init__(self, beta: float, gamma: float, mixing: Mixing = "frequency"):
         self.params = SISParams(beta=beta, gamma=gamma, mixing=mixing)
         
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("S", "I")
     
     def rhs(self, t: float, y: np.ndarray,
@@ -214,7 +216,8 @@ class SIR(ODEBase):
     def __init__(self, beta: float, gamma: float, mixing: Mixing = "frequency"):
         self.params = SIRParams(beta=beta, gamma=gamma, mixing=mixing)
         
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("S", "I", "R")
     
     def rhs(self, t: float, y: np.ndarray,
@@ -316,7 +319,8 @@ class SIRS(ODEBase):
                  mixing: Mixing = "frequency"):
         self.params = SIRSParams(beta=beta, gamma=gamma, omega=omega, mixing=mixing)
         
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("S", "I", "R")
     
     def rhs(self, t: float, y: np.ndarray,
@@ -412,7 +416,8 @@ class SEIR(ODEBase):
                  mixing: Mixing = "frequency"):
         self.params = SEIRParams(beta=beta, sigma=sigma, gamma=gamma, mixing=mixing)
         
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("S", "E", "I", "R")
     
     def rhs(self, t: float, y: np.ndarray,
@@ -429,16 +434,42 @@ class SEIR(ODEBase):
         dR = +p.gamma * I
         return np.array([dS, dE, dI, dR])
     
+    # For closed SEIR (no demography)
     def R0(self, N0: float = 1.0) -> float:
         """
-        Basic reproduction number.
-        Note: Same formula as SIR; latent period adds delay but not in R0.
+        Calculate basic reproduction number for SEIR model.
+        
+        For closed population (no births/deaths):
+            R₀ = β/γ
+        
+        The latent period (1/σ) affects dynamics but not R₀ in closed models
+        because all exposed individuals eventually become infectious.
+        
+        Parameters
+        ----------
+        N0 : float
+            Total population size (only for density-dependent mixing)
+            
+        Returns
+        -------
+        float
+            Basic reproduction number
+            
+        Notes
+        -----
+        In models with demography (μ > 0), the latent period DOES affect R₀
+        because individuals can die while in E class. See SEIRDemographyCounts
+        for that case.
+        
+        References
+        ----------
+        Keeling & Rohani (2008), Section 2.6, Box 2.5
         """
         if self.params.mixing == "frequency":
             return self.params.beta / self.params.gamma
         else:
             return (self.params.beta * N0) / self.params.gamma
-    
+        
     def mean_generation_time(self) -> float:
         """
         Mean generation time = latent period + infectious period.
@@ -486,7 +517,8 @@ class SEIRS(ODEBase):
         self.params = SEIRSParams(beta=beta, sigma=sigma, gamma=gamma, 
                                    omega=omega, mixing=mixing)
         
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("S", "E", "I", "R")
     
     def rhs(self, t: float, y: np.ndarray,

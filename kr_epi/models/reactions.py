@@ -4,35 +4,27 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Tuple, Literal, Optional, Sequence
 import numpy as np
 
+
 Array = np.ndarray
 Mixing = Literal["frequency", "density"]
 
-# --- Parameter Dataclasses (similar to ODE models) ---
+# --- Parameter Dataclasses (Corrected Structure) ---
 @dataclass(frozen=True)
 class ReactionParamsBase:
-    """
-    Base class for reaction parameters.
-    Ensures subclasses will call validation.
-    """
+    """Base class for reaction parameters."""
     def __post_init__(self):
-        # This method will be called by any inheriting dataclasses
         pass
 
 @dataclass(frozen=True)
 class SIRDemographyCountsReactionParams(ReactionParamsBase):
-    """
-    Parameters for the SIR Demography Counts reaction system.
-    
-    Non-default fields are defined FIRST.
-    Default fields are defined AFTER.
-    """
-    # --- NON-DEFAULT FIELDS ---
+    """Parameters for the SIR Demography Counts reaction system."""
+    # --- NON-DEFAULT FIELDS (Must come first) ---
     beta: float
     gamma: float
     v: float  # Birth rate
     mu: float  # Natural death rate
     
-    # --- DEFAULT FIELDS ---
+    # --- DEFAULT FIELDS (Inherited or new) ---
     mixing: Mixing = "frequency"
     beta_fn: Optional[Callable[[float], float]] = None
     vacc_p: float = 0.0 # Vaccination at birth coverage
@@ -40,11 +32,11 @@ class SIRDemographyCountsReactionParams(ReactionParamsBase):
 
     def __post_init__(self):
         """Validate parameters after initialization."""
-        # super().__post_init__() # Not needed if base post_init is empty
-
+        super().__post_init__() 
+        # ... (all your validation checks go here) ...
         if self.mixing not in ("frequency", "density"):
             raise ValueError(f"mixing must be 'frequency' or 'density', got '{self.mixing}'")
-        if self.beta < 0: # Allow beta=0 for forcing via beta_fn
+        if self.beta < 0:
             raise ValueError(f"beta must be non-negative, got {self.beta}")
         if self.gamma <= 0:
             raise ValueError(f"gamma must be positive, got {self.gamma}")
@@ -57,6 +49,7 @@ class SIRDemographyCountsReactionParams(ReactionParamsBase):
         if self.delta < 0:
             raise ValueError(f"delta (disease death rate) must be non-negative, got {self.delta}")
 
+        
 # --- Reaction Definition (Remains the same) ---
 @dataclass(frozen=True)
 class Reaction:

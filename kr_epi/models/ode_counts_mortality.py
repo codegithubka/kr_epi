@@ -67,7 +67,8 @@ class SIRDemographyCountsMortality(ODEBase):
             beta=beta, gamma=gamma, v=v, mu=mu, delta=delta, mixing=mixing, vacc_p=vacc_p
         )
 
-    def state_labels(self) -> Sequence[str]:
+    @property
+    def labels(self) -> list[str]:
         return ("X", "Y", "Z")
 
     def rhs(self, t: float, y: np.ndarray, beta_fn: Optional[Callable[[float], float]] = None) -> np.ndarray:

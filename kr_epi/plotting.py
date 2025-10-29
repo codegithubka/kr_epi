@@ -426,10 +426,6 @@ def plot_forcing(
     return ax
 
 
-Python
-# kr_epi/plotting.py
-# ... (existing imports and functions) ...
-
 def plot_psd(
     f: Array,
     pxx: Array,

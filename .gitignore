@@ -79,3 +79,19 @@ env/
 ENV/
 env.bak/
 venv.bak/
+
+# Virtual Environment
+bin/
+lib/
+share/
+pyvenv.cfg
+include/
+*.cfg
+
+# Python environments
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/

@@ -1,89 +1,174 @@
+# kr_epi/models/reactions.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Tuple, Literal, Optional, Sequence
 import numpy as np
-from kr_epi.models.reactions import ReactionSystem
 
 Array = np.ndarray
+Mixing = Literal["frequency", "density"]
 
+# --- Parameter Dataclasses (similar to ODE models) ---
+@dataclass(frozen=True)
+class ReactionParamsBase:
+    mixing: Mixing = "frequency"
+    beta_fn: Optional[Callable[[float], float]] = None
 
+    def __post_init__(self):
+        if self.mixing not in ("frequency", "density"):
+            raise ValueError(f"mixing must be 'frequency' or 'density', got '{self.mixing}'")
+
+@dataclass(frozen=True)
+class SIRDemographyCountsReactionParams(ReactionParamsBase):
+    beta: float
+    gamma: float
+    v: float  # Birth rate
+    mu: float  # Natural death rate
+    vacc_p: float = 0.0 # Vaccination at birth coverage
+    delta: float = 0.0 # Infection-induced mortality rate
+
+    def __post_init__(self):
+        super().__post_init__() # Call base validation
+        if self.beta < 0: # Allow beta=0 for forcing via beta_fn
+            raise ValueError(f"beta must be non-negative, got {self.beta}")
+        if self.gamma <= 0:
+            raise ValueError(f"gamma must be positive, got {self.gamma}")
+        if self.v < 0:
+            raise ValueError(f"v (birth rate) must be non-negative, got {self.v}")
+        if self.mu <= 0:
+            raise ValueError(f"mu (natural death rate) must be positive, got {self.mu}")
+        if not 0 <= self.vacc_p < 1:
+            raise ValueError(f"vacc_p must be in [0, 1), got {self.vacc_p}")
+        if self.delta < 0:
+            raise ValueError(f"delta (disease death rate) must be non-negative, got {self.delta}")
+
+# --- Reaction Definition (Remains the same) ---
+@dataclass(frozen=True)
+class Reaction:
+    """A single reaction with hazard (propensity) and state change vector."""
+    name: str
+    stoich: Dict[str, int]
+    hazard: Callable[[float, Dict[str, float], ReactionParamsBase], float]
+    # hazard(t, state_as_dict, params_dataclass) -> rate
+
+# --- Reaction System ---
 @dataclass
-class Direct:
-    """Gillespie Direct (SSA) for a ReactionSystem (counts)."""
-    system: ReactionSystem
-    seed: Optional[int] = None
+class ReactionSystem:
+    labels: Sequence[str]
+    reactions: Sequence[Reaction]
+    params: ReactionParamsBase # Use the base dataclass or specific ones
+    _idx: Dict[str, int] = field(init=False, repr=False)
+    _S: np.ndarray = field(init=False, repr=False)
 
-    def run(self,
-            x0: Dict[str, float],
-            t_max: float,
-            *,
-            record_times: Optional[Array] = None, # type: ignore
-            max_events: int = 2_000_000) -> Tuple[Array, Array]: # type: ignore
-        rng = np.random.default_rng(self.seed)
-        labels = self.system.labels
-        idx, S, hazards = self.system.as_vectorized()
+    def __post_init__(self):
+        # Precompute index map and stoichiometry matrix
+        self._idx = {k: i for i, k in enumerate(self.labels)}
+        self._S = np.zeros((len(self.labels), len(self.reactions)), dtype=int)
+        for j, r in enumerate(self.reactions):
+            for k, v in r.stoich.items():
+                if k not in self._idx:
+                    raise ValueError(f"State '{k}' in reaction '{r.name}' stoichiometry not found in labels {self.labels}")
+                self._S[self._idx[k], j] = v
 
-        # state vector
-        x = np.array([float(x0.get(k, 0.0)) for k in labels], dtype=float)
-        # require non-negative integers (counts)
-        x = np.maximum(0.0, np.floor(x + 1e-12))
+    def get_stoichiometry_matrix(self) -> np.ndarray:
+        return self._S.copy() # Return a copy
 
-        t = 0.0
-        T: List[float] = [t]
-        Xs: List[Array] = [x.copy()]
+    def calculate_hazards(self, t: float, y: np.ndarray) -> np.ndarray:
+        """Calculates all reaction hazards given the current state vector y."""
+        if len(y) != len(self.labels):
+            raise ValueError(f"State vector y has length {len(y)}, expected {len(self.labels)}")
+        # Convert state vector y to dictionary for hazard functions
+        state_dict = {label: float(y[i]) for i, label in enumerate(self.labels)}
+        
+        hazards = np.array(
+            [max(0.0, r.hazard(t, state_dict, self.params)) for r in self.reactions],
+            dtype=float
+        )
+        return hazards
 
-        # If record_times provided, we’ll do linear interpolation onto them at the end.
-        n_events = 0
-        while t < t_max and n_events < max_events:
-            a = hazards(t, x)
-            a0 = a.sum()
-            if a0 <= 0.0:
-                # No possible reaction; jump to t_max and record final state
-                T.append(t_max)
-                Xs.append(x.copy())
-                break
+# ---------- Incidence Helper (Remains the same) ----------
+def _incidence(beta: float, X: float, Y: float, N: float, mixing: Mixing) -> float:
+    if N <= 0 or X <= 0 or Y <= 0 or beta <= 0:
+        return 0.0
+    return beta * X * Y / N if mixing == "frequency" else beta * X * Y
 
-            # Exponential waiting time
-            tau = rng.exponential(1.0 / a0)
-            t_next = t + tau
-            if t_next > t_max:
-                # Stop exactly at t_max with current state
-                T.append(t_max)
-                Xs.append(x.copy())
-                break
+# ---------- Factory Function Example (SIR with Demography/Mortality) ----------
+def sir_demography_counts_reactions(
+    beta: float, gamma: float, v: float, mu: float, *,
+    mixing: Mixing = "frequency", vacc_p: float = 0.0, delta: float = 0.0,
+    beta_fn: Optional[Callable[[float], float]] = None
+) -> ReactionSystem:
+    """
+    Creates a ReactionSystem for an SIR model with births, deaths,
+    optional vaccination at birth, and optional disease-induced mortality.
 
-            # Pick reaction j with prob a_j/a0 via inverse CDF
-            r = rng.random() * a0
-            cum = np.cumsum(a)
-            j = int(np.searchsorted(cum, r, side="right"))
+    States: X (Susceptible), Y (Infectious), Z (Recovered/Immune).
+    """
+    labels = ("X", "Y", "Z")
+    params = SIRDemographyCountsReactionParams(
+        beta=beta, gamma=gamma, v=v, mu=mu, mixing=mixing,
+        vacc_p=vacc_p, delta=delta, beta_fn=beta_fn
+    )
 
-            # Apply stoichiometry: x := x + S[:, j], but guard against negative
-            proposal = x + S[:, j]
-            if np.any(proposal < 0):
-                # if impossible (e.g., recovery with Y=0 due to numerical rounding), skip
-                # but this is rare since hazards already 0 in those states
-                T.append(t_next)
-                Xs.append(x.copy())
-                t = t_next
-                n_events += 1
-                continue
+    def N(s: Dict[str, float]) -> float:
+        # Helper to calculate total population from state dict
+        return max(0.0, s["X"] + s["Y"] + s["Z"])
 
-            x = proposal
-            t = t_next
-            T.append(t)
-            Xs.append(x.copy())
-            n_events += 1
+    def get_beta(t: float, p: SIRDemographyCountsReactionParams) -> float:
+        # Helper to get the correct beta value at time t
+        return p.beta_fn(t) if p.beta_fn is not None else p.beta
 
-        T = np.asarray(T, dtype=float)
-        X = np.vstack(Xs).T  # shape (n_states, n_timepoints)
+    reactions: List[Reaction] = [
+        Reaction(
+            name="infection",
+            stoich={"X": -1, "Y": +1},
+            # Hazard needs params cast to the specific dataclass type if needed inside
+            hazard=lambda t, s, p: _incidence(get_beta(t, p), s["X"], s["Y"], N(s), p.mixing) # type: ignore
+        ),
+        Reaction(
+            name="recovery",
+            stoich={"Y": -1, "Z": +1},
+            hazard=lambda t, s, p: p.gamma * s["Y"] # type: ignore
+        ),
+        Reaction(
+            name="birth_to_X",
+            stoich={"X": +1},
+            hazard=lambda t, s, p: p.v * (1.0 - p.vacc_p) * N(s) # type: ignore
+        ),
+        Reaction(
+            name="birth_to_Z",
+            stoich={"Z": +1},
+            hazard=lambda t, s, p: p.v * p.vacc_p * N(s) # type: ignore
+        ),
+        Reaction(
+            name="death_X",
+            stoich={"X": -1},
+            hazard=lambda t, s, p: p.mu * s["X"] # type: ignore
+        ),
+        Reaction(
+            name="death_Y",
+            stoich={"Y": -1},
+            hazard=lambda t, s, p: p.mu * s["Y"] # type: ignore
+        ),
+        Reaction(
+            name="death_Z",
+            stoich={"Z": -1},
+            hazard=lambda t, s, p: p.mu * s["Z"] # type: ignore
+        ),
+    ]
 
-        # Interpolate onto record_times if requested (piecewise-constant, left-hold)
-        if record_times is not None:
-            rt = np.asarray(record_times, dtype=float)
-            # indices of last T <= rt
-            ii = np.searchsorted(T, rt, side="right") - 1
-            ii = np.clip(ii, 0, len(T) - 1)
-            X_interp = X[:, ii]
-            return rt, X_interp
+    # Add infection-induced mortality if delta > 0
+    if params.delta > 0:
+        reactions.append(
+            Reaction(
+                name="infection_death_Y",
+                stoich={"Y": -1},
+                hazard=lambda t, s, p: p.delta * s["Y"] # type: ignore
+            )
+        )
 
-        return T, X
+    return ReactionSystem(labels=labels, reactions=reactions, params=params)
+
+# --- Add similar factory functions for SIS, SEIR etc. as needed ---
+# Example placeholder:
+# def sis_demography_counts_reactions(...) -> ReactionSystem: ...
+# def seir_demography_counts_reactions(...) -> ReactionSystem: ...

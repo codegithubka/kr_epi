@@ -1,119 +1,161 @@
+# kr_epi/stochastic/tau_leap.py
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
-from kr_epi.stochastic.direct import ReactionSystem
+from kr_epi.models.reactions import ReactionSystem
+# from kr_epi.models.reactions import ReactionSystem # May need import
 
 Array = np.ndarray
 
 @dataclass
 class TauLeap:
-    system: ReactionSystem
+    """Tau-Leaping approximate stochastic simulation for a ReactionSystem."""
+    system: 'ReactionSystem' # Use quotes for forward reference if needed
     seed: Optional[int] = None
-    adapt: bool = True
-    eps: float = 0.03
-    max_dt: float = 1.0
-    min_dt: float = 1e-4
-    safety: float = 0.9
-    backtrack: int = 8
-    clamp_negatives: bool = True
-    
+    adapt: bool = True       # Use adaptive tau based on state?
+    eps: float = 0.03        # Epsilon for adaptive tau step (relative change tolerance)
+    max_dt: float = 1.0      # Maximum tau allowed
+    min_dt: float = 1e-6     # Minimum tau allowed (to prevent tiny steps)
+    safety: float = 0.9      # Safety factor for adaptive tau
+    critical_threshold: int = 10 # Reactions involving species < threshold use SSA step
+    max_ssa_steps: int = 100 # Max SSA steps per tau-leap interval if needed
+
     def run(self,
             x0: Dict[str, float],
             t_max: float,
             *,
-            dt: float = 0.2,
-            record_times: Optional[Array] = None) -> Tuple[Array, Array]: # type: ignore
+            dt: float = 0.1,         # Initial/Fixed tau if adapt=False
+            record_times: Optional[np.ndarray] = None
+            ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Runs the Tau-Leaping simulation.
+
+        Parameters are similar to Direct.run, with 'dt' used as the
+        initial or fixed time step.
+        """
         rng = np.random.default_rng(self.seed)
         labels = self.system.labels
-        idx, S, hazards = self.system.as_vectorized()
+        # Use precomputed index map and stoichiometry matrix
+        idx = self.system._idx
+        S = self.system.get_stoichiometry_matrix() # <-- CHANGE HERE
 
         x = np.array([float(x0.get(k, 0.0)) for k in labels], dtype=float)
-        # integerize and non-negative
-        x = np.maximum(0.0, np.floor(x + 1e-12))
+        x = np.maximum(0.0, np.floor(x + 1e-12)) # Ensure non-negative integer counts
 
-        # Internal event times (adaptive) or fixed grid
-        T: List[float] = [0.0]
-        Xs: List[Array] = [x.copy()] # type: ignore
+        T_list: List[float] = [0.0]
+        X_list: List[np.ndarray] = [x.copy()]
         t = 0.0
 
         while t < t_max:
-            a = hazards(t, x)             # propensities a_j >= 0
-            a = np.clip(a, 0.0, np.inf)
+            # Calculate current hazards
+            a = self.system.calculate_hazards(t, x) # <-- CHANGE HERE
+            a = np.maximum(a, 0.0) # Ensure non-negative hazards
             a_sum = a.sum()
-            if a_sum <= 0.0:
-                # no more reactions possible: jump to t_max
-                T.append(t_max)
-                Xs.append(x.copy())
+
+            if a_sum <= 1e-10:
+                # No reactions possible, jump to end
+                if T_list[-1] < t_max:
+                    T_list.append(t_max)
+                    X_list.append(x.copy())
                 break
 
-            # choose tau
-            tau = dt if not self.adapt else self._suggest_tau(x, a, S)
-            tau = min(tau, self.max_dt, t_max - t)
-            if tau < self.min_dt:
-                tau = min(self.min_dt, t_max - t)
+            # Determine timestep tau
+            if self.adapt:
+                tau = self._suggest_tau(x, a, S)
+            else:
+                tau = dt
+            tau = max(self.min_dt, min(tau, self.max_dt, t_max - t))
 
-            # attempt leap; backtrack on negatives
-            ok = False
-            tau_try = float(tau)
-            for _ in range(max(1, self.backtrack)):
-                # Poisson draws for each reaction channel
-                k = rng.poisson(a * tau_try)
-                proposal = x + S @ k
+            # --- Critical Reaction Check (Gillespie et al., 2001 adaptation) ---
+            # Identify reactions that could deplete a reactant below zero
+            critical_reactions = self._get_critical_reactions(x, a, S, tau)
 
-                if (proposal >= -1e-9).all():
-                    ok = True
-                    x = np.maximum(0.0, proposal) if self.clamp_negatives else proposal
-                    t += tau_try
-                    T.append(t)
-                    Xs.append(x.copy())
-                    break
+            if critical_reactions.any():
+                 # Use one or more SSA steps for critical reactions
+                 # Here, we'll take a simplified approach: take *one* SSA step if any reaction is critical
+                 # A more advanced method would take SSA steps until no reaction is critical for a small tau_ssa.
 
-                # backtrack: shrink step
-                tau_try *= 0.5
-                if tau_try < self.min_dt:
-                    # final guard: clamp (rare)
-                    if self.clamp_negatives:
-                        x = np.maximum(0.0, proposal)
-                        t += tau_try
-                        T.append(t)
-                        Xs.append(x.copy())
-                        ok = True
-                    break
+                 # --- Perform one SSA Step ---
+                 a_ssa = a # Use current hazards
+                 a0_ssa = a_ssa.sum()
+                 if a0_ssa <= 1e-10: # Double check in case states changed subtly
+                     if T_list[-1] < t_max:
+                        T_list.append(t_max)
+                        X_list.append(x.copy())
+                     break
 
-            if not ok:
-                # If still not ok (should be extremely rare), stop to avoid loops
-                T.append(t)
-                Xs.append(x.copy())
-                break
+                 tau_ssa = rng.exponential(1.0 / a0_ssa)
 
-        T = np.asarray(T, dtype=float)
-        X = np.vstack(Xs).T  # (n_states, n_times)
+                 # If SSA step is larger than tau-leap step, just do tau-leap
+                 if tau_ssa >= tau:
+                      num_events = rng.poisson(a * tau)
+                      x_change = S @ num_events
+                      x_new = x + x_change
+                      t = t + tau
+                 else:
+                     # Take the SSA step
+                     probabilities_ssa = a_ssa / a0_ssa
+                     probabilities_ssa /= probabilities_ssa.sum() # Normalize
+                     j_ssa = rng.choice(len(a_ssa), p=probabilities_ssa)
 
+                     x_new = x + S[:, j_ssa]
+                     t = t + tau_ssa # Advance time by SSA step
+
+                     # If SSA step exceeds t_max, handle it
+                     if t >= t_max:
+                          t = t_max
+                          # State x remains as it was *before* this failed step
+                          x_new = x.copy()
+                          if T_list[-1] < t_max:
+                              T_list.append(t)
+                              X_list.append(x_new)
+                          break # Exit loop
+
+
+            else:
+                 # --- Perform Tau-Leap Step ---
+                 # Poisson draws for number of times each reaction occurs in [t, t+tau)
+                 num_events = rng.poisson(a * tau)
+                 x_change = S @ num_events # Calculate net change in state vector
+                 x_new = x + x_change
+                 t = t + tau # Advance time
+
+            # Check for and handle negative populations (clamp to zero)
+            if np.any(x_new < -1e-9):
+                 # This indicates tau might be too large, but for simplicity here, we clamp.
+                 # A more sophisticated method might reduce tau and retry.
+                 print(f"Warning: Negative state encountered at t={t:.2f}. Clamping to zero.")
+                 x_new = np.maximum(0.0, x_new)
+
+            x = x_new
+            T_list.append(t)
+            X_list.append(x.copy())
+
+
+        t_arr = np.array(T_list, dtype=float)
+        X_arr = np.vstack(X_list).T # shape (n_states, n_times)
+
+        # Interpolate if needed
         if record_times is not None:
             rt = np.asarray(record_times, dtype=float)
-            # left-hold interpolation
-            ii = np.searchsorted(T, rt, side="right") - 1
-            ii = np.clip(ii, 0, len(T) - 1)
-            return rt, X[:, ii]
+            indices = np.searchsorted(t_arr, rt, side="right") - 1
+            indices = np.clip(indices, 0, len(T_list) - 1)
+            X_interp = X_arr[:, indices]
+            return rt, X_interp
 
-        return T, X
+        return t_arr, X_arr
 
-    
-    def _suggest_tau(self, x: Array, a: Array, S: Array) -> float: # type: ignore
-        """
-        Anderson-style heuristic:
-          Choose tau so that for every species i,
-            |E[ΔX_i]| = |sum_j nu_ij * a_j| * tau  <= eps * max(1, x_i)
-          => tau_i = eps * max(1, x_i) / (|sum_j nu_ij * a_j| + tiny)
-        """
-        small = 1e-12
-        drift = S @ a  # expected change per unit time for each species
-        scale = np.maximum(1.0, x)  # protects small populations
-        denom = np.abs(drift) + small
-        tau_vec = self.eps * scale / denom
-        tau = float(np.min(tau_vec))
-        # safety factor to be conservative
-        tau *= self.safety
-        # cap by max_dt, lower bound handled in caller
-        return max(self.min_dt, min(tau, self.max_dt))
+    def _suggest_tau(self, x: np.ndarray, a: np.ndarray, S: np.ndarray) -> float:
+        """Suggests tau based on Gillespie's 2001 condition."""
+        small = 1e-12 # Prevent division by zero
+
+        # Estimate mean and variance of change for each species i
+        mu = S @ a      # E[dX_i/dt]
+        sigma_sq = S**2 @ a # Approx Var[dX_i/dt] (only works if reactions are independent, approximation)
+
+        # Condition: |mu_i * tau| << x_i  AND  sigma_sq_i * tau^2 << x_i
+        # Simplified using epsilon:
+        # tau <= eps * x_i / |mu_i|
+        # tau <= eps^2 * x_i / sigma_sq_i
+        # We need tau >

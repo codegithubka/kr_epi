@@ -10,24 +10,40 @@ Mixing = Literal["frequency", "density"]
 # --- Parameter Dataclasses (similar to ODE models) ---
 @dataclass(frozen=True)
 class ReactionParamsBase:
-    mixing: Mixing = "frequency"
-    beta_fn: Optional[Callable[[float], float]] = None
-
+    """
+    Base class for reaction parameters.
+    Ensures subclasses will call validation.
+    """
     def __post_init__(self):
-        if self.mixing not in ("frequency", "density"):
-            raise ValueError(f"mixing must be 'frequency' or 'density', got '{self.mixing}'")
+        # This method will be called by any inheriting dataclasses
+        pass
 
 @dataclass(frozen=True)
 class SIRDemographyCountsReactionParams(ReactionParamsBase):
+    """
+    Parameters for the SIR Demography Counts reaction system.
+    
+    Non-default fields are defined FIRST.
+    Default fields are defined AFTER.
+    """
+    # --- NON-DEFAULT FIELDS ---
     beta: float
     gamma: float
     v: float  # Birth rate
     mu: float  # Natural death rate
+    
+    # --- DEFAULT FIELDS ---
+    mixing: Mixing = "frequency"
+    beta_fn: Optional[Callable[[float], float]] = None
     vacc_p: float = 0.0 # Vaccination at birth coverage
     delta: float = 0.0 # Infection-induced mortality rate
 
     def __post_init__(self):
-        super().__post_init__() # Call base validation
+        """Validate parameters after initialization."""
+        # super().__post_init__() # Not needed if base post_init is empty
+
+        if self.mixing not in ("frequency", "density"):
+            raise ValueError(f"mixing must be 'frequency' or 'density', got '{self.mixing}'")
         if self.beta < 0: # Allow beta=0 for forcing via beta_fn
             raise ValueError(f"beta must be non-negative, got {self.beta}")
         if self.gamma <= 0:

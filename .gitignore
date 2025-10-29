@@ -1,6 +1,29 @@
-__pycache__/
-*.pyc
-.venv/
-artifacts/
-*.egg-info/
+# Sphinx build outputs
+build/
+_build/
 
+# Sphinx auto-generated files
+source/_autosummary/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

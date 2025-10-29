@@ -1,3 +1,6 @@
+#/!/usr/bin/env python3
+
+
 from typing import Callable, Dict, Optional, Sequence, Tuple
 import numpy as np
 from scipy.integrate import solve_ivp

@@ -8,6 +8,8 @@ kr\_epi.analysis.spectra
 
    .. autosummary::
    
+      calculate_psd
       dominant_peaks
+      ensemble_psd
       psd_welch
    

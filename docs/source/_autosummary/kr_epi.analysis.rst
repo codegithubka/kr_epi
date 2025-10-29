@@ -11,4 +11,6 @@
    :recursive:
 
    equilibria
+   sensitivity
    spectra
+   stability

@@ -1,4 +1,4 @@
-kr\_epi.models.reactions
+﻿kr\_epi.models.reactions
 ========================
 
 .. automodule:: kr_epi.models.reactions
@@ -8,13 +8,14 @@ kr\_epi.models.reactions
 
    .. autosummary::
    
-      incidence
-      sir_demography_counts
+      sir_demography_counts_reactions
    
    .. rubric:: Classes
 
    .. autosummary::
    
       Reaction
+      ReactionParamsBase
       ReactionSystem
+      SIRDemographyCountsReactionParams
    

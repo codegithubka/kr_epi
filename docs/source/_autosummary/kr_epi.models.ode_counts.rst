@@ -1,4 +1,4 @@
-kr\_epi.models.ode\_counts
+﻿kr\_epi.models.ode\_counts
 ==========================
 
 .. automodule:: kr_epi.models.ode_counts
@@ -8,8 +8,12 @@ kr\_epi.models.ode\_counts
 
    .. autosummary::
    
+      MSIRDemographyCounts
+      MSIRDemographyCountsParams
       SEIRDemographyCounts
       SEIRDemographyCountsParams
+      SEIRSDemographyCounts
+      SEIRSDemographyCountsParams
       SIRDemographyCounts
       SIRDemographyCountsParams
       SISDemographyCounts

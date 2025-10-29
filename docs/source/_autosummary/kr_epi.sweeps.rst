@@ -10,4 +10,5 @@
    :toctree:
    :recursive:
 
+   parameter_sweep
    runners
